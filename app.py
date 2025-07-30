@@ -7,10 +7,14 @@ from datetime import datetime, timedelta
 import requests
 
 # ================================
-# Load API keys from Streamlit Cloud secrets
+# Load API keys safely
 # ================================
-aero_key = st.secrets["AERODATABOX_API_KEY"]
-weather_key = st.secrets["OPENWEATHER_API_KEY"]
+try:
+    aero_key = st.secrets["AERODATABOX_API_KEY"]
+    weather_key = st.secrets["OPENWEATHER_API_KEY"]
+except KeyError as e:
+    st.error(f"Missing secret: {e}. Please set it in Streamlit Cloud → Settings → Secrets.")
+    st.stop()
 
 # ================================
 # Function to fetch arrivals from AeroDataBox API
@@ -18,7 +22,10 @@ weather_key = st.secrets["OPENWEATHER_API_KEY"]
 def fetch_arrivals(airport_code, hours=24):
     """Fetch recent flight arrivals for the given airport."""
     try:
-        url = f"https://aerodatabox.p.rapidapi.com/flights/airports/icao/{airport_code}/{(datetime.utcnow()-timedelta(hours=hours)).isoformat()}Z/{datetime.utcnow().isoformat()}Z"
+        start_time = (datetime.utcnow() - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_time = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        url = f"https://aerodatabox.p.rapidapi.com/flights/airports/icao/{airport_code}/{start_time}/{end_time}"
         headers = {
             "X-RapidAPI-Key": aero_key,
             "X-RapidAPI-Host": "aerodatabox.p.rapidapi.com"
@@ -26,6 +33,7 @@ def fetch_arrivals(airport_code, hours=24):
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         data = response.json()
+
         flights = []
         for flight in data.get("arrivals", []):
             flights.append({
@@ -35,6 +43,7 @@ def fetch_arrivals(airport_code, hours=24):
                 "origin": flight.get("origin", {}).get("airport", {}).get("name"),
                 "aircraftModel": flight.get("aircraft", {}).get("model"),
             })
+
         return pd.DataFrame(flights)
     except Exception as e:
         st.error(f"Error fetching arrivals: {e}")
@@ -88,8 +97,8 @@ if st.button("Fetch Data"):
         st.subheader("Flight Arrivals")
         st.dataframe(arrivals_df)
 
-        # Weather info (using airport's approximate lat/lon)
-        # You can replace this with actual geocoding
+        # Weather info (using airport's approximate lat/lon for now)
+        # Replace with actual geocoding if needed
         airport_lat, airport_lon = 51.4700, -0.4543  # Example: Heathrow
         weather = fetch_weather(airport_lat, airport_lon)
         if weather:
@@ -99,28 +108,53 @@ if st.button("Fetch Data"):
 
     # Process noise file if uploaded
     if noise_file is not None:
-        noise_df = pd.read_csv(noise_file, parse_dates=["timestamp"])
-        st.subheader("Noise Data")
-        st.dataframe(noise_df.head())
+        try:
+            noise_df = pd.read_csv(noise_file)
+            noise_df.columns = noise_df.columns.str.strip()
 
-        plot_noise_trends(noise_df)
+            # Ensure timestamp exists and is in datetime format
+            if "timestamp" not in noise_df.columns:
+                st.error("CSV must contain a 'timestamp' column.")
+                st.stop()
 
-        # Example PyDeck map
-        st.subheader("Noise Event Locations")
-        if {"lat", "lon"}.issubset(noise_df.columns):
-            noise_layer = pdk.Layer(
-                "ScatterplotLayer",
-                data=noise_df,
-                get_position="[lon, lat]",
-                get_color="[200, 30, 0, 160]",
-                get_radius=100,
-            )
-            view_state = pdk.ViewState(latitude=noise_df["lat"].mean(),
-                                       longitude=noise_df["lon"].mean(),
-                                       zoom=10)
-            st.pydeck_chart(pdk.Deck(layers=[noise_layer], initial_view_state=view_state))
+            noise_df["timestamp"] = pd.to_datetime(noise_df["timestamp"], errors="coerce")
+            noise_df = noise_df.dropna(subset=["timestamp"])
+
+            # Ensure noise_level exists
+            if "noise_level" not in noise_df.columns:
+                st.error("CSV must contain a 'noise_level' column.")
+                st.stop()
+
+            st.subheader("Noise Data")
+            st.dataframe(noise_df.head())
+
+            plot_noise_trends(noise_df)
+
+            # Example PyDeck map
+            st.subheader("Noise Event Locations")
+            if {"lat", "lon"}.issubset(noise_df.columns):
+                noise_layer = pdk.Layer(
+                    "ScatterplotLayer",
+                    data=noise_df,
+                    get_position="[lon, lat]",
+                    get_color="[200, 30, 0, 160]",
+                    get_radius=100,
+                )
+                view_state = pdk.ViewState(
+                    latitude=noise_df["lat"].mean(),
+                    longitude=noise_df["lon"].mean(),
+                    zoom=10
+                )
+                st.pydeck_chart(pdk.Deck(layers=[noise_layer], initial_view_state=view_state))
+            else:
+                st.info("No 'lat' and 'lon' columns found for map plotting.")
+
+        except Exception as e:
+            st.error(f"Error processing CSV: {e}")
+
 else:
     st.info("Enter an airport code and click **Fetch Data** to begin.")
+
 
 
 
